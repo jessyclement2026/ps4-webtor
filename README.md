@@ -76,3 +76,5 @@ This project is licensed under the **BSD 3-Clause License** — see the [LICENSE
 
 ## Brewology Verification
 Official releases for this project are also published on the Brewology PS4 Homebrew Store by **`cutiefly`**.
+
+*Disclaimer: This software is an independent, open-source community project developed using the open-source `ps4-payload-sdk` and is not affiliated with or endorsed by The Tor Project or Sony Interactive Entertainment. It is provided "as is", without warranty of any kind, strictly for lawful privacy, educational, and research purposes. Users are solely responsible for complying with their local laws when using this software.*
