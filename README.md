@@ -73,3 +73,6 @@ This project is licensed under the **BSD 3-Clause License** — see the [LICENSE
 *Note: This is an unofficial community project and is not affiliated with or endorsed by The Tor Project.*
 
 > **⚠️ Warning:** Make sure **System Software Updates** are disabled in **PS4 Settings → System → Automatic Downloads** before going online so you do not accidentally upgrade your firmware and lose your jailbreak.
+
+## Brewology Verification
+Official releases for this project are also published on the Brewology PS4 Homebrew Store by **`cutiefly`**.
