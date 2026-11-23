@@ -92,7 +92,6 @@ void *realloc(void *ptr, size_t size) {
     free(ptr);
     return new_ptr;
 }
-
 int sceKernelSendNotificationRequest(int device, void *req, size_t size, int blocking);
 
 static void ps4_notify(const char *msg) {
@@ -124,11 +123,12 @@ static char *my_strcasestr(const char *haystack, const char *needle) {
 
 static void url_decode(const char *src, char *dst, size_t dst_sz) {
     size_t di = 0;
-    char hex[4] = {0};
+    char *hex = calloc(1, 4);
     for (size_t si = 0; *(src + si) && di + 1 < dst_sz; si++) {
-        if (*(src + si) == '%' && isxdigit((unsigned char)*(src + si + 1)) && isxdigit((unsigned char)*(src + si + 2))) {
-            hex[0] = *(src + si + 1);
-            hex[1] = *(src + si + 2);
+        if (hex && *(src + si) == '%' && isxdigit((unsigned char)*(src + si + 1)) && isxdigit((unsigned char)*(src + si + 2))) {
+            *(hex + 0) = *(src + si + 1);
+            *(hex + 1) = *(src + si + 2);
+            *(hex + 2) = '\0';
             *(dst + di++) = (char)strtol(hex, NULL, 16);
             si += 2;
         } else if (*(src + si) == '+') {
@@ -138,6 +138,7 @@ static void url_decode(const char *src, char *dst, size_t dst_sz) {
         }
     }
     *(dst + di) = '\0';
+    free(hex);
 }
 
 static void url_encode(const char *src, char *dst, size_t dst_sz) {
@@ -175,61 +176,74 @@ static int socks5_connect(const char *host, uint16_t port) {
         return -1;
     }
 
-    unsigned char greet[3] = { 0x05, 0x01, 0x00 };
-    if (send(s, greet, 3, 0) != 3) {
+    unsigned char *buf = calloc(1, 320);
+    if (!buf) {
         close(s);
         return -1;
     }
 
-    unsigned char resp[2] = {0};
-    if (recv(s, resp, 2, MSG_WAITALL) != 2 || resp[1] != 0x00) {
+    *(buf + 0) = 0x05;
+    *(buf + 1) = 0x01;
+    *(buf + 2) = 0x00;
+    if (send(s, buf, 3, 0) != 3) {
+        free(buf);
+        close(s);
+        return -1;
+    }
+
+    if (recv(s, buf, 2, MSG_WAITALL) != 2 || *(buf + 1) != 0x00) {
+        free(buf);
         close(s);
         return -1;
     }
 
     size_t hlen = strlen(host);
     if (hlen > 255) {
-        close(s);
-        return -1;
-    }
-    unsigned char req[264];
-    req[0] = 0x05;
-    req[1] = 0x01;
-    req[2] = 0x00;
-    req[3] = 0x03;
-    req[4] = (unsigned char)hlen;
-    memcpy(req + 5, host, hlen);
-    req[5 + hlen] = (port >> 8) & 0xFF;
-    req[6 + hlen] = port & 0xFF;
-
-    if (send(s, req, 7 + hlen, 0) != (ssize_t)(7 + hlen)) {
+        free(buf);
         close(s);
         return -1;
     }
 
-    unsigned char reply[4] = {0};
-    if (recv(s, reply, 4, MSG_WAITALL) != 4 || reply[1] != 0x00) {
+    *(buf + 0) = 0x05;
+    *(buf + 1) = 0x01;
+    *(buf + 2) = 0x00;
+    *(buf + 3) = 0x03;
+    *(buf + 4) = (unsigned char)hlen;
+    memcpy(buf + 5, host, hlen);
+    *(buf + 5 + hlen) = (port >> 8) & 0xFF;
+    *(buf + 6 + hlen) = port & 0xFF;
+
+    if (send(s, buf, 7 + hlen, 0) != (ssize_t)(7 + hlen)) {
+        free(buf);
         close(s);
         return -1;
     }
 
-    char tmp[260];
-    if (reply[3] == 0x01) {
-        recv(s, tmp, 6, MSG_WAITALL);
-    } else if (reply[3] == 0x04) {
-        recv(s, tmp, 18, MSG_WAITALL);
-    } else if (reply[3] == 0x03) {
+    if (recv(s, buf, 4, MSG_WAITALL) != 4 || *(buf + 1) != 0x00) {
+        free(buf);
+        close(s);
+        return -1;
+    }
+
+    unsigned char atyp = *(buf + 3);
+    if (atyp == 0x01) {
+        recv(s, buf, 6, MSG_WAITALL);
+    } else if (atyp == 0x04) {
+        recv(s, buf, 18, MSG_WAITALL);
+    } else if (atyp == 0x03) {
         unsigned char alen = 0;
         recv(s, &alen, 1, MSG_WAITALL);
-        recv(s, tmp, alen + 2, MSG_WAITALL);
+        recv(s, buf, alen + 2, MSG_WAITALL);
     }
+
+    free(buf);
     return s;
 }
 
 static void resolve_rel_url(const char *base, const char *href, char *out, size_t out_sz) {
     if (strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0) {
         strncpy(out, href, out_sz - 1);
-        out[out_sz - 1] = '\0';
+        *(out + out_sz - 1) = '\0';
         return;
     }
     if (strncmp(href, "//", 2) == 0) {
@@ -237,7 +251,7 @@ static void resolve_rel_url(const char *base, const char *href, char *out, size_
         return;
     }
     strncpy(out, base, out_sz - 1);
-    out[out_sz - 1] = '\0';
+    *(out + out_sz - 1) = '\0';
     char *p = strstr(out, "://");
     if (!p) return;
     if (*href == '/') {
@@ -255,49 +269,68 @@ static void resolve_rel_url(const char *base, const char *href, char *out, size_
         strncat(out, href, out_sz - strlen(out) - 1);
     }
 }
-
 static void serve_shell(int cfd) {
     const char *html =
-        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>WebTor PS4</title>"
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>PS4 WebTor</title>"
         "<style>"
         "*{box-sizing:border-box;margin:0;padding:0;font-family:sans-serif}"
         "body{background:#12101a;color:#eee;display:flex;flex-direction:column;height:100vh;overflow:hidden}"
         "#bar{background:#1e1a2e;padding:10px 14px;display:flex;gap:8px;align-items:center;border-bottom:2px solid #6b3fa0}"
         "#url-wrap{flex:1;display:flex;align-items:center;background:#0d0b14;border:1px solid #4c3575;border-radius:6px;padding-right:6px}"
+        "#url-wrap:focus-within{border-color:#9d65e5;box-shadow:0 0 0 2px rgba(157,101,229,0.28)}"
         "#url{flex:1;padding:10px 12px;border:none;background:transparent;color:#fff;font-size:16px;outline:none}"
         "#clr{background:transparent;color:#8c82a8;padding:4px 8px;font-size:16px}"
         "#clr:hover{color:#fff;background:transparent}"
-        "button,.bm{background:#6b3fa0;color:#fff;border:none;padding:10px 14px;border-radius:6px;font-size:15px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:4px}"
+        "button,.bm{background:#6b3fa0;color:#fff;border:none;padding:10px 14px;border-radius:6px;font-size:15px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:4px}"
         "button:hover,.bm:hover{background:#8452c2}"
         ".sec{background:#2d2647}"
+        ".danger{background:#7a2638}"
+        ".danger:hover{background:#a3324a}"
         "#bms{background:#171424;padding:6px 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #2b2440}"
         ".bm{padding:5px 10px;font-size:13px;background:#2a2342}"
         ".del{color:#ff7b7b;margin-left:6px;font-weight:bold;cursor:pointer}"
-        "#status{margin-left:auto;font-size:12px;color:#9a90b8}"
+        "#status{margin-left:auto;font-size:12px;color:#9a90b8;display:inline-flex;align-items:center;gap:6px}"
+        ".dot{width:8px;height:8px;border-radius:50%;background:#4caf50;display:inline-block}"
         "iframe{flex:1;width:100%;border:none;background:#12101a}"
+        "#foot{background:#171424;padding:5px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid #2b2440;font-size:12px;color:#8c82a8}"
+        "#foot a{color:#b388eb;text-decoration:none;font-weight:bold}"
+        "#foot a:hover{text-decoration:underline}"
         "</style></head><body>"
         "<form id='bar' onsubmit='go(document.getElementById(\"url\").value);return false;'>"
+        "<button type='button' class='sec' onclick='goHome()' title='Home'>&#8962;</button>"
         "<button type='button' class='sec' onclick='history.back()' title='Back'>&larr;</button>"
         "<button type='button' class='sec' onclick='reloadFrame()' title='Reload'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><path d='M21 12a9 9 0 1 1-3-6.7L21 8'/><polyline points='21 3 21 8 16 8'/></svg></button>"
         "<div id='url-wrap'>"
-        "<input id='url' type='text' placeholder='Enter URL...' autocomplete='off'>"
+        "<input id='url' type='text' placeholder='Enter .onion or https:// URL...' autocomplete='off'>"
         "<button type='button' id='clr' onclick='var i=document.getElementById(\"url\");i.value=\"\";i.focus();' title='Clear'>&times;</button>"
         "</div>"
         "<button type='submit' id='gobtn'>Go</button>"
         "<button type='button' class='sec' onclick='addBm()' title='Save Bookmark'>+ Save</button>"
         "<button type='button' class='sec' onclick='zoom(-0.1)' title='Zoom Out'>A-</button>"
         "<button type='button' class='sec' onclick='zoom(0.1)' title='Zoom In'>A+</button>"
+        "<button type='button' class='danger' onclick='quitApp()' title='Stop WebTor Server'>Quit</button>"
         "</form>"
         "<div id='bms'>"
-        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>GitHub: webtor-ps4</a>"
-        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>GitHub: tor-ps4</a>"
+        "<a class='bm' href='#' onclick='go(\"https://github.com/jessyclement2026/webtor-ps4\");return false;'>webtor-ps4</a>"
+        "<a class='bm' href='#' onclick='go(\"https://github.com/jessyclement2026/tor-ps4\");return false;'>tor-ps4</a>"
         "<span id='user-bms' style='display:inline-flex;gap:8px;flex-wrap:wrap'></span>"
-        "<span id='status'>Ready</span>"
+        "<span id='status'><span class='dot' id='sdot'></span><span id='stxt'>Ready</span></span>"
         "</div>"
-        "<iframe id='view' name='view' onload='doneLoad()' srcdoc=\"<body style='background:#12101a;color:#8c82a8;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:90vh;margin:0'><p>Enter a URL above to browse via Tor.</p></body>\"></iframe>"
+        "<iframe id='view' name='view' onload='doneLoad()'></iframe>"
+        "<div id='foot'>"
+        "<span>SOCKS5: 127.0.0.1:9050 &bull; WebTor: 127.0.0.1:8080</span>"
+        "<span>Developed by <a href='#' onclick='go(\"https://github.com/jessyclement2026/tor-ps4\");return false;'>GitHub</a></span>"
+        "</div>"
         "<script>"
         "var z=1,busy=false;"
-        "function setSt(t,b){busy=b;document.getElementById('status').textContent=t;document.getElementById('gobtn').textContent=b?'Stop':'Go';}"
+        "var homeHtml=\"<body style='background:#12101a;color:#eee;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:90vh;margin:0;text-align:center'>"
+        "<div style='background:#1e1a2e;border:1px solid #3c2c61;border-radius:12px;padding:28px 34px;max-width:480px'>"
+        "<h2 style='color:#c79eff;margin-bottom:10px'>PS4 WebTor</h2>"
+        "<p style='color:#a99ec9;font-size:14px;line-height:1.5;margin-bottom:18px'>Browse <b>.onion</b> hidden services and modern <b>HTTPS</b> sites through your local Tor daemon (127.0.0.1:9050).</p>"
+        "<div style='font-size:12px;color:#8c82a8'>Enter any address in the bar above or click <b>Quit</b> anytime to stop the payload without rebooting.</div>"
+        "</div></body>\";"
+        "function goHome(){busy=false;document.getElementById('url').value='';setSt('Ready',false);var f=document.getElementById('view');f.style.background='#12101a';f.srcdoc=homeHtml;}"
+        "function setSt(t,b){busy=b;document.getElementById('stxt').textContent=t;document.getElementById('sdot').style.background=b?'#f59e0b':'#4caf50';document.getElementById('gobtn').textContent=b?'Stop':'Go';}"
         "function doneLoad(){if(busy)setSt('Ready',false);}"
         "function go(u){if(busy){var f=document.getElementById('view');f.src='about:blank';setSt('Stopped',false);return;}"
         "u=u.trim();if(!u)return;if(!/^https?:\\/\\//i.test(u))u='http://'+u;"
@@ -306,19 +339,22 @@ static void serve_shell(int cfd) {
         "setSt('Loading via Tor...',true);f.src='/fetch?url='+encodeURIComponent(u);}"
         "function reloadFrame(){var f=document.getElementById('view');if(f.src&&f.src!=='about:blank'){setSt('Loading via Tor...',true);f.src=f.src;}}"
         "function zoom(d){z=Math.max(0.6,Math.min(1.8,z+d));document.getElementById('view').style.zoom=z;}"
+        "function quitApp(){setSt('Stopping...',true);var f=document.getElementById('view');f.removeAttribute('srcdoc');f.style.background='#12101a';f.src='/quit';}"
         "function renderBms(){var b=JSON.parse(localStorage.getItem('wt_bms')||'[]'),h='';"
         "for(var i=0;i<b.length;i++){h+=\"<span class='bm'><a href='#' style='color:#fff;text-decoration:none' onclick='go(\\\"\"+b[i].u+\"\\\");return false;'>\"+b[i].n+\"</a><span class='del' onclick='delBm(\"+i+\")'>&times;</span></span>\";}"
         "document.getElementById('user-bms').innerHTML=h;}"
-        "function addBm(){var u=document.getElementById('url').value.trim();if(!u)return;var n=u.replace(/^https?:\\/\\//,'').split('/')[0].slice(0,24);"
+        "function addBm(){var u=document.getElementById('url').value.trim();if(!u)return;var n=u.replace(/^https?:\\/\\//,'').split('/').shift().slice(0,24);"
         "var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');b.push({n:n,u:u});localStorage.setItem('wt_bms',JSON.stringify(b));renderBms();}"
         "function delBm(i){var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');b.splice(i,1);localStorage.setItem('wt_bms',JSON.stringify(b));renderBms();}"
-        "renderBms();"
+        "renderBms();goHome();"
         "window.addEventListener('message',function(e){if(e.data&&e.data.torUrl){document.getElementById('url').value=e.data.torUrl;setSt('Ready',false);}});"
         "</script></body></html>";
 
     size_t hlen = strlen(html);
-    char hdr[256];
-    int hdr_len = snprintf(hdr, sizeof(hdr),
+    char *hdr = calloc(1, 256);
+    if (!hdr) return;
+
+    int hdr_len = snprintf(hdr, 256,
         "HTTP/1.1 200 OK\r\n"
         "Content-Type: text/html; charset=utf-8\r\n"
         "Content-Length: %zu\r\n"
@@ -326,6 +362,7 @@ static void serve_shell(int cfd) {
 
     send_all(cfd, hdr, (size_t)hdr_len);
     send_all(cfd, html, hlen);
+    free(hdr);
 }
 static void handle_fetch(int cfd, const char *target_url) {
     char *cur_url = malloc(2048);
@@ -348,7 +385,7 @@ static void handle_fetch(int cfd, const char *target_url) {
     }
 
     strncpy(cur_url, target_url, 2047);
-    cur_url[2047] = '\0';
+    *(cur_url + 2047) = '\0';
 
     for (int redir = 0; redir < 5; redir++) {
         int use_tls = (strncmp(cur_url, "https://", 8) == 0);
@@ -360,12 +397,12 @@ static void handle_fetch(int cfd, const char *target_url) {
             size_t hlen = (size_t)(slash - host_start);
             if (hlen >= 511) hlen = 511;
             memcpy(host, host_start, hlen);
-            host[hlen] = '\0';
+            *(host + hlen) = '\0';
             strncpy(path, slash, 1535);
-            path[1535] = '\0';
+            *(path + 1535) = '\0';
         } else {
             strncpy(host, host_start, 511);
-            host[511] = '\0';
+            *(host + 511) = '\0';
             strcpy(path, "/");
         }
 
@@ -428,12 +465,12 @@ static void handle_fetch(int cfd, const char *target_url) {
         else send_all(tfd, req, (size_t)rlen);
 
         int hlen = 0;
-        hdr[0] = '\0';
+        *(hdr + 0) = '\0';
         while (hlen < 8190) {
             int n = use_tls ? SSL_read(ssl, hdr + hlen, 1) : (int)recv(tfd, hdr + hlen, 1, 0);
             if (n <= 0) break;
             hlen += n;
-            hdr[hlen] = '\0';
+            *(hdr + hlen) = '\0';
             if (hlen >= 4 && strcmp(hdr + hlen - 4, "\r\n\r\n") == 0) break;
         }
 
@@ -446,7 +483,7 @@ static void handle_fetch(int cfd, const char *target_url) {
                 if (eol) *eol = '\0';
                 resolve_rel_url(cur_url, loc, next_url, 2048);
                 strncpy(cur_url, next_url, 2047);
-                cur_url[2047] = '\0';
+                *(cur_url + 2047) = '\0';
                 if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); }
                 close(tfd);
                 continue;
@@ -462,7 +499,7 @@ static void handle_fetch(int cfd, const char *target_url) {
             size_t clen = eol ? (size_t)(eol - ct) : strlen(ct);
             if (clen >= 255) clen = 255;
             memcpy(ctype, ct, clen);
-            ctype[clen] = '\0';
+            *(ctype + clen) = '\0';
         }
 
         size_t cap = 65536, bsize = 0;
@@ -478,7 +515,7 @@ static void handle_fetch(int cfd, const char *target_url) {
             if (n <= 0) break;
             bsize += (size_t)n;
         }
-        if (body) body[bsize] = '\0';
+        if (body) *(body + bsize) = '\0';
 
         if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); }
         close(tfd);
@@ -524,7 +561,7 @@ static void handle_fetch(int cfd, const char *target_url) {
                     strncmp(p, "javascript:", 11) != 0 &&
                     *p != '#') {
                     memcpy(raw, p, ulen);
-                    raw[ulen] = '\0';
+                    *(raw + ulen) = '\0';
                     resolve_rel_url(cur_url, raw, abs_u, 2048);
                     url_encode(abs_u, enc_u, 4096);
                     int plen = snprintf(proxied, 4200, "/fetch?url=%s", enc_u);
@@ -583,7 +620,7 @@ static void handle_client(int cfd) {
 
     ssize_t n = recv(cfd, req, 4095, 0);
     if (n <= 0) goto done_client;
-    req[n] = '\0';
+    *(req + n) = '\0';
 
     if (sscanf(req, "%31s %2047s", method, path) != 2) {
         goto done_client;
@@ -651,7 +688,7 @@ int main(void) {
         return 1;
     }
 
-    ps4_notify("WebTor PS4 READY on port 8080!");
+    ps4_notify("PS4 WebTor READY on port 8080!");
     OPENSSL_init_ssl(OPENSSL_INIT_NO_LOAD_CONFIG, NULL);
 
     while (1) {
