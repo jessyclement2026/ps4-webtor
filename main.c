@@ -1,9 +1,11 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <ctype.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/time.h>
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -11,30 +13,65 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
-#define LISTEN_PORT 8080
-#define ARENA_SIZE  (64 * 1024 * 1024)
+#define LISTEN_PORT     8080
+#define ARENA_SIZE      (64 * 1024 * 1024)
+#define LARGE_THRESHOLD (32 * 1024)
+
+#define MAGIC_ARENA 0x574542544152454EULL
+#define MAGIC_MMAP  0x574542544D4D4150ULL
+
 static char *arena_base = NULL;
 static size_t arena_offset = 0;
 static char *last_origin = NULL;
 
-typedef struct { size_t size; } alloc_hdr_t;
+typedef struct {
+    size_t size;
+    size_t magic;
+} alloc_hdr_t;
 
 void *malloc(size_t size) {
     if (size == 0) size = 1;
     size = (size + 15) & ~((size_t)15);
     size_t total = size + sizeof(alloc_hdr_t);
+
+    if (size > LARGE_THRESHOLD) {
+        alloc_hdr_t *hdr = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (hdr == MAP_FAILED) return NULL;
+        hdr->size = size;
+        hdr->magic = MAGIC_MMAP;
+        return (void *)(hdr + 1);
+    }
+
     if (!arena_base) {
         arena_base = mmap(NULL, ARENA_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         if (arena_base == MAP_FAILED) { arena_base = NULL; return NULL; }
     }
+
     size_t off = __atomic_fetch_add(&arena_offset, total, __ATOMIC_SEQ_CST);
-    if (off + total > ARENA_SIZE) return NULL;
+    if (off + total > ARENA_SIZE) {
+        alloc_hdr_t *hdr = mmap(NULL, total, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (hdr == MAP_FAILED) return NULL;
+        hdr->size = size;
+        hdr->magic = MAGIC_MMAP;
+        return (void *)(hdr + 1);
+    }
+
     alloc_hdr_t *hdr = (alloc_hdr_t *)(arena_base + off);
     hdr->size = size;
+    hdr->magic = MAGIC_ARENA;
     return (void *)(hdr + 1);
 }
 
-void free(void *ptr) { (void)ptr; }
+void free(void *ptr) {
+    if (!ptr) return;
+    alloc_hdr_t *hdr = ((alloc_hdr_t *)ptr) - 1;
+    if (hdr->magic == MAGIC_MMAP) {
+        hdr->magic = 0;
+        munmap(hdr, hdr->size + sizeof(alloc_hdr_t));
+    } else if (hdr->magic == MAGIC_ARENA) {
+        hdr->magic = 0;
+    }
+}
 
 void *calloc(size_t nmemb, size_t size) {
     size_t total = nmemb * size;
@@ -45,20 +82,35 @@ void *calloc(size_t nmemb, size_t size) {
 
 void *realloc(void *ptr, size_t size) {
     if (!ptr) return malloc(size);
-    if (size == 0) return NULL;
+    if (size == 0) { free(ptr); return NULL; }
     alloc_hdr_t *hdr = ((alloc_hdr_t *)ptr) - 1;
+    if (hdr->magic != MAGIC_ARENA && hdr->magic != MAGIC_MMAP) return malloc(size);
     if (hdr->size >= size) return ptr;
     void *new_ptr = malloc(size);
     if (!new_ptr) return NULL;
     memcpy(new_ptr, ptr, hdr->size);
+    free(ptr);
     return new_ptr;
 }
+
 int sceKernelSendNotificationRequest(int device, void *req, size_t size, int blocking);
 
 static void ps4_notify(const char *msg) {
     char *req = calloc(1, 1080);
+    if (!req) return;
     strncpy(req + 45, msg, 1023);
     sceKernelSendNotificationRequest(0, req, 1080, 0);
+    free(req);
+}
+
+static void send_all(int fd, const void *buf, size_t len) {
+    const char *p = (const char *)buf;
+    size_t sent = 0;
+    while (sent < len) {
+        ssize_t n = send(fd, p + sent, len - sent, 0);
+        if (n <= 0) break;
+        sent += (size_t)n;
+    }
 }
 
 static char *my_strcasestr(const char *haystack, const char *needle) {
@@ -72,11 +124,11 @@ static char *my_strcasestr(const char *haystack, const char *needle) {
 
 static void url_decode(const char *src, char *dst, size_t dst_sz) {
     size_t di = 0;
+    char hex[4] = {0};
     for (size_t si = 0; *(src + si) && di + 1 < dst_sz; si++) {
         if (*(src + si) == '%' && isxdigit((unsigned char)*(src + si + 1)) && isxdigit((unsigned char)*(src + si + 2))) {
-            char *hex = calloc(1, 4);
-            *(hex + 0) = *(src + si + 1);
-            *(hex + 1) = *(src + si + 2);
+            hex[0] = *(src + si + 1);
+            hex[1] = *(src + si + 2);
             *(dst + di++) = (char)strtol(hex, NULL, 16);
             si += 2;
         } else if (*(src + si) == '+') {
@@ -106,37 +158,67 @@ static void url_encode(const char *src, char *dst, size_t dst_sz) {
 static int socks5_connect(const char *host, uint16_t port) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) return -1;
+
+    struct timeval tv;
+    tv.tv_sec = 20;
+    tv.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
     struct sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
     addr.sin_port = htons(9050);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) { close(s); return -1; }
+    if (connect(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        close(s);
+        return -1;
+    }
 
-    unsigned char *greet = malloc(4);
-    *(greet + 0) = 0x05; *(greet + 1) = 0x01; *(greet + 2) = 0x00;
-    if (send(s, greet, 3, 0) != 3) { close(s); return -1; }
+    unsigned char greet[3] = { 0x05, 0x01, 0x00 };
+    if (send(s, greet, 3, 0) != 3) {
+        close(s);
+        return -1;
+    }
 
-    unsigned char *resp = malloc(4);
-    if (recv(s, resp, 2, MSG_WAITALL) != 2 || *(resp + 1) != 0x00) { close(s); return -1; }
+    unsigned char resp[2] = {0};
+    if (recv(s, resp, 2, MSG_WAITALL) != 2 || resp[1] != 0x00) {
+        close(s);
+        return -1;
+    }
 
     size_t hlen = strlen(host);
-    if (hlen > 255) { close(s); return -1; }
-    unsigned char *req = malloc(300);
-    *(req + 0) = 0x05; *(req + 1) = 0x01; *(req + 2) = 0x00; *(req + 3) = 0x03;
-    *(req + 4) = (unsigned char)hlen;
+    if (hlen > 255) {
+        close(s);
+        return -1;
+    }
+    unsigned char req[264];
+    req[0] = 0x05;
+    req[1] = 0x01;
+    req[2] = 0x00;
+    req[3] = 0x03;
+    req[4] = (unsigned char)hlen;
     memcpy(req + 5, host, hlen);
-    *(req + 5 + hlen) = (port >> 8) & 0xFF;
-    *(req + 6 + hlen) = port & 0xFF;
+    req[5 + hlen] = (port >> 8) & 0xFF;
+    req[6 + hlen] = port & 0xFF;
 
-    if (send(s, req, 7 + hlen, 0) != (ssize_t)(7 + hlen)) { close(s); return -1; }
-    unsigned char *reply = malloc(8);
-    if (recv(s, reply, 4, MSG_WAITALL) != 4 || *(reply + 1) != 0x00) { close(s); return -1; }
+    if (send(s, req, 7 + hlen, 0) != (ssize_t)(7 + hlen)) {
+        close(s);
+        return -1;
+    }
 
-    char *tmp = malloc(300);
-    if (*(reply + 3) == 0x01) { recv(s, tmp, 6, MSG_WAITALL); }
-    else if (*(reply + 3) == 0x04) { recv(s, tmp, 18, MSG_WAITALL); }
-    else if (*(reply + 3) == 0x03) {
+    unsigned char reply[4] = {0};
+    if (recv(s, reply, 4, MSG_WAITALL) != 4 || reply[1] != 0x00) {
+        close(s);
+        return -1;
+    }
+
+    char tmp[260];
+    if (reply[3] == 0x01) {
+        recv(s, tmp, 6, MSG_WAITALL);
+    } else if (reply[3] == 0x04) {
+        recv(s, tmp, 18, MSG_WAITALL);
+    } else if (reply[3] == 0x03) {
         unsigned char alen = 0;
         recv(s, &alen, 1, MSG_WAITALL);
         recv(s, tmp, alen + 2, MSG_WAITALL);
@@ -147,7 +229,7 @@ static int socks5_connect(const char *host, uint16_t port) {
 static void resolve_rel_url(const char *base, const char *href, char *out, size_t out_sz) {
     if (strncmp(href, "http://", 7) == 0 || strncmp(href, "https://", 8) == 0) {
         strncpy(out, href, out_sz - 1);
-        *(out + out_sz - 1) = '\0';
+        out[out_sz - 1] = '\0';
         return;
     }
     if (strncmp(href, "//", 2) == 0) {
@@ -155,7 +237,7 @@ static void resolve_rel_url(const char *base, const char *href, char *out, size_
         return;
     }
     strncpy(out, base, out_sz - 1);
-    *(out + out_sz - 1) = '\0';
+    out[out_sz - 1] = '\0';
     char *p = strstr(out, "://");
     if (!p) return;
     if (*href == '/') {
@@ -173,15 +255,10 @@ static void resolve_rel_url(const char *base, const char *href, char *out, size_
         strncat(out, href, out_sz - strlen(out) - 1);
     }
 }
-static void serve_shell(int cfd) {
-    const char *hdr =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/html; charset=utf-8\r\n"
-        "Connection: close\r\n\r\n";
-    send(cfd, hdr, strlen(hdr), 0);
 
+static void serve_shell(int cfd) {
     const char *html =
-        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>PS4 WebTor</title>"
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>WebTor PS4</title>"
         "<style>"
         "*{box-sizing:border-box;margin:0;padding:0;font-family:sans-serif}"
         "body{background:#12101a;color:#eee;display:flex;flex-direction:column;height:100vh;overflow:hidden}"
@@ -212,7 +289,8 @@ static void serve_shell(int cfd) {
         "<button type='button' class='sec' onclick='zoom(0.1)' title='Zoom In'>A+</button>"
         "</form>"
         "<div id='bms'>"
-        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>GitHub: https://github.com/jessyclement2026/</a>"
+        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>GitHub: webtor-ps4</a>"
+        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>GitHub: tor-ps4</a>"
         "<span id='user-bms' style='display:inline-flex;gap:8px;flex-wrap:wrap'></span>"
         "<span id='status'>Ready</span>"
         "</div>"
@@ -231,14 +309,23 @@ static void serve_shell(int cfd) {
         "function renderBms(){var b=JSON.parse(localStorage.getItem('wt_bms')||'[]'),h='';"
         "for(var i=0;i<b.length;i++){h+=\"<span class='bm'><a href='#' style='color:#fff;text-decoration:none' onclick='go(\\\"\"+b[i].u+\"\\\");return false;'>\"+b[i].n+\"</a><span class='del' onclick='delBm(\"+i+\")'>&times;</span></span>\";}"
         "document.getElementById('user-bms').innerHTML=h;}"
-        "function addBm(){var u=document.getElementById('url').value.trim();if(!u)return;var n=u.replace(/^https?:\\/\\//,'').split('/').slice(0,24);"
+        "function addBm(){var u=document.getElementById('url').value.trim();if(!u)return;var n=u.replace(/^https?:\\/\\//,'').split('/')[0].slice(0,24);"
         "var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');b.push({n:n,u:u});localStorage.setItem('wt_bms',JSON.stringify(b));renderBms();}"
         "function delBm(i){var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');b.splice(i,1);localStorage.setItem('wt_bms',JSON.stringify(b));renderBms();}"
         "renderBms();"
         "window.addEventListener('message',function(e){if(e.data&&e.data.torUrl){document.getElementById('url').value=e.data.torUrl;setSt('Ready',false);}});"
         "</script></body></html>";
-    send(cfd, html, strlen(html), 0);
 
+    size_t hlen = strlen(html);
+    char hdr[256];
+    int hdr_len = snprintf(hdr, sizeof(hdr),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n", hlen);
+
+    send_all(cfd, hdr, (size_t)hdr_len);
+    send_all(cfd, html, hlen);
 }
 static void handle_fetch(int cfd, const char *target_url) {
     char *cur_url = malloc(2048);
@@ -255,8 +342,13 @@ static void handle_fetch(int cfd, const char *target_url) {
     char *proxied = malloc(4200);
     char *hook = malloc(4096);
 
+    if (!cur_url || !host || !path || !req || !hdr || !next_url ||
+        !ctype || !out_hdr || !raw || !abs_u || !enc_u || !proxied || !hook) {
+        goto cleanup_vars;
+    }
+
     strncpy(cur_url, target_url, 2047);
-    *(cur_url + 2047) = '\0';
+    cur_url[2047] = '\0';
 
     for (int redir = 0; redir < 5; redir++) {
         int use_tls = (strncmp(cur_url, "https://", 8) == 0);
@@ -265,20 +357,22 @@ static void handle_fetch(int cfd, const char *target_url) {
         const char *slash = strchr(host_start, '/');
 
         if (slash) {
-            size_t hlen = slash - host_start;
+            size_t hlen = (size_t)(slash - host_start);
             if (hlen >= 511) hlen = 511;
             memcpy(host, host_start, hlen);
-            *(host + hlen) = '\0';
+            host[hlen] = '\0';
             strncpy(path, slash, 1535);
-            *(path + 1535) = '\0';
+            path[1535] = '\0';
         } else {
             strncpy(host, host_start, 511);
-            *(host + 511) = '\0';
+            host[511] = '\0';
             strcpy(path, "/");
         }
 
         if (!last_origin) last_origin = malloc(512);
-        snprintf(last_origin, 512, "%s://%s", use_tls ? "https" : "http", host);
+        if (last_origin) {
+            snprintf(last_origin, 512, "%s://%s", use_tls ? "https" : "http", host);
+        }
 
         char *colon = strchr(host, ':');
         if (colon) {
@@ -288,11 +382,12 @@ static void handle_fetch(int cfd, const char *target_url) {
 
         int tfd = socks5_connect(host, port);
         if (tfd < 0) {
-            const char *err = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
-                              "<body style='background:#12101a;color:#ff7b7b;font-family:sans-serif;padding:30px'>"
-                              "<h2>Tor Connection Failed</h2><p>Could not reach hidden service via 127.0.0.1:9050. Make sure ps4-tor.elf is running.</p></body>";
-            send(cfd, err, strlen(err), 0);
-            return;
+            const char *err =
+                "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+                "<body style='background:#12101a;color:#ff7b7b;font-family:sans-serif;padding:30px'>"
+                "<h2>Tor Connection Failed</h2><p>Could not reach site via 127.0.0.1:9050. Make sure tor-ps4.elf is running and bootstrapped to 100%.</p></body>";
+            send_all(cfd, err, strlen(err));
+            goto cleanup_vars;
         }
 
         SSL_CTX *ctx = NULL;
@@ -304,17 +399,20 @@ static void handle_fetch(int cfd, const char *target_url) {
             SSL_set_fd(ssl, tfd);
             SSL_set_tlsext_host_name(ssl, host);
             if (SSL_connect(ssl) <= 0) {
-                SSL_free(ssl); SSL_CTX_free(ctx); close(tfd);
+                SSL_free(ssl);
+                SSL_CTX_free(ctx);
+                close(tfd);
                 if (strncmp(cur_url, "https://", 8) == 0) {
                     memmove(cur_url + 4, cur_url + 5, strlen(cur_url + 5) + 1);
                     memcpy(cur_url, "http://", 7);
                     continue;
                 }
-                const char *err = "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
-                                  "<body style='background:#12101a;color:#ff7b7b;font-family:sans-serif;padding:30px'>"
-                                  "<h2>TLS Handshake Failed</h2><p>Could not establish TLS connection with server.</p></body>";
-                send(cfd, err, strlen(err), 0);
-                return;
+                const char *err =
+                    "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
+                    "<body style='background:#12101a;color:#ff7b7b;font-family:sans-serif;padding:30px'>"
+                    "<h2>TLS Handshake Failed</h2><p>Could not establish TLS connection with server.</p></body>";
+                send_all(cfd, err, strlen(err));
+                goto cleanup_vars;
             }
         }
 
@@ -327,14 +425,15 @@ static void handle_fetch(int cfd, const char *target_url) {
             path, host);
 
         if (use_tls) SSL_write(ssl, req, rlen);
-        else send(tfd, req, rlen, 0);
+        else send_all(tfd, req, (size_t)rlen);
 
         int hlen = 0;
+        hdr[0] = '\0';
         while (hlen < 8190) {
-            int n = use_tls ? SSL_read(ssl, hdr + hlen, 1) : recv(tfd, hdr + hlen, 1, 0);
+            int n = use_tls ? SSL_read(ssl, hdr + hlen, 1) : (int)recv(tfd, hdr + hlen, 1, 0);
             if (n <= 0) break;
             hlen += n;
-            *(hdr + hlen) = '\0';
+            hdr[hlen] = '\0';
             if (hlen >= 4 && strcmp(hdr + hlen - 4, "\r\n\r\n") == 0) break;
         }
 
@@ -347,11 +446,13 @@ static void handle_fetch(int cfd, const char *target_url) {
                 if (eol) *eol = '\0';
                 resolve_rel_url(cur_url, loc, next_url, 2048);
                 strncpy(cur_url, next_url, 2047);
+                cur_url[2047] = '\0';
                 if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); }
                 close(tfd);
                 continue;
             }
         }
+
         strcpy(ctype, "text/html; charset=utf-8");
         char *ct = my_strcasestr(hdr, "\r\nContent-Type:");
         if (ct) {
@@ -361,7 +462,7 @@ static void handle_fetch(int cfd, const char *target_url) {
             size_t clen = eol ? (size_t)(eol - ct) : strlen(ct);
             if (clen >= 255) clen = 255;
             memcpy(ctype, ct, clen);
-            *(ctype + clen) = '\0';
+            ctype[clen] = '\0';
         }
 
         size_t cap = 65536, bsize = 0;
@@ -373,11 +474,11 @@ static void handle_fetch(int cfd, const char *target_url) {
                 if (!nb) break;
                 body = nb;
             }
-            int n = use_tls ? SSL_read(ssl, body + bsize, 4096) : recv(tfd, body + bsize, 4096, 0);
+            int n = use_tls ? SSL_read(ssl, body + bsize, 4096) : (int)recv(tfd, body + bsize, 4096, 0);
             if (n <= 0) break;
-            bsize += n;
+            bsize += (size_t)n;
         }
-        if (body) *(body + bsize) = '\0';
+        if (body) body[bsize] = '\0';
 
         if (ssl) { SSL_shutdown(ssl); SSL_free(ssl); SSL_CTX_free(ctx); }
         close(tfd);
@@ -386,7 +487,7 @@ static void handle_fetch(int cfd, const char *target_url) {
             "HTTP/1.1 200 OK\r\n"
             "Content-Type: %s\r\n"
             "Connection: close\r\n\r\n", ctype);
-        send(cfd, out_hdr, ohlen, 0);
+        send_all(cfd, out_hdr, (size_t)ohlen);
 
         if (body && my_strcasestr(ctype, "text/html") != NULL) {
             const char *p = body;
@@ -399,33 +500,39 @@ static void handle_fetch(int cfd, const char *target_url) {
                 else if (h2) { hit = h2; attr_len = 4; }
 
                 if (!hit) {
-                    send(cfd, p, strlen(p), 0);
+                    send_all(cfd, p, strlen(p));
                     break;
                 }
 
-                send(cfd, p, hit - p + attr_len, 0);
+                send_all(cfd, p, (size_t)(hit - p + attr_len));
                 p = hit + attr_len;
 
                 char q = *p;
                 if (q != '"' && q != '\'') continue;
-                send(cfd, &q, 1, 0);
+                send_all(cfd, &q, 1);
                 p++;
 
                 const char *end_q = strchr(p, q);
-                if (!end_q) { send(cfd, p, strlen(p), 0); break; }
+                if (!end_q) {
+                    send_all(cfd, p, strlen(p));
+                    break;
+                }
 
-                size_t ulen = end_q - p;
-                if (ulen > 0 && ulen < 900 && strncmp(p, "data:", 5) != 0 && strncmp(p, "javascript:", 11) != 0 && *p != '#') {
+                size_t ulen = (size_t)(end_q - p);
+                if (ulen > 0 && ulen < 900 &&
+                    strncmp(p, "data:", 5) != 0 &&
+                    strncmp(p, "javascript:", 11) != 0 &&
+                    *p != '#') {
                     memcpy(raw, p, ulen);
-                    *(raw + ulen) = '\0';
+                    raw[ulen] = '\0';
                     resolve_rel_url(cur_url, raw, abs_u, 2048);
                     url_encode(abs_u, enc_u, 4096);
                     int plen = snprintf(proxied, 4200, "/fetch?url=%s", enc_u);
-                    send(cfd, proxied, plen, 0);
+                    send_all(cfd, proxied, (size_t)plen);
                 } else {
-                    send(cfd, p, ulen, 0);
+                    send_all(cfd, p, ulen);
                 }
-                send(cfd, &q, 1, 0);
+                send_all(cfd, &q, 1);
                 p = end_q + 1;
             }
 
@@ -433,39 +540,69 @@ static void handle_fetch(int cfd, const char *target_url) {
                 "<script>"
                 "if(window.parent)window.parent.postMessage({torUrl:'%s'},'*');"
                 "</script>", cur_url);
-            send(cfd, hook, hlen_js, 0);
+            send_all(cfd, hook, (size_t)hlen_js);
         } else if (body && bsize > 0) {
-            send(cfd, body, bsize, 0);
+            send_all(cfd, body, bsize);
         }
-        return;
-    }
-}
 
+        free(body);
+        break;
+    }
+
+cleanup_vars:
+    free(cur_url);
+    free(host);
+    free(path);
+    free(req);
+    free(hdr);
+    free(next_url);
+    free(ctype);
+    free(out_hdr);
+    free(raw);
+    free(abs_u);
+    free(enc_u);
+    free(proxied);
+    free(hook);
+}
 static void handle_client(int cfd) {
+    struct timeval tv;
+    tv.tv_sec = 15;
+    tv.tv_usec = 0;
+    setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
     char *req = malloc(4096);
     char *method = malloc(32);
     char *path = malloc(2048);
     char *decoded = malloc(2048);
     char *rel_target = malloc(2560);
 
+    if (!req || !method || !path || !decoded || !rel_target) {
+        goto done_client;
+    }
+
     ssize_t n = recv(cfd, req, 4095, 0);
-    if (n <= 0) { close(cfd); return; }
-    *(req + n) = '\0';
+    if (n <= 0) goto done_client;
+    req[n] = '\0';
 
     if (sscanf(req, "%31s %2047s", method, path) != 2) {
-        close(cfd);
-        return;
+        goto done_client;
     }
 
     if (strncmp(path, "/fetch?url=", 11) == 0) {
         url_decode(path + 11, decoded, 2048);
         handle_fetch(cfd, decoded);
     } else if (strcmp(path, "/quit") == 0) {
-        const char *bye = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nWebGate stopped.";
-        send(cfd, bye, strlen(bye), 0);
+        const char *bye =
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: text/plain\r\n"
+            "Content-Length: 15\r\n"
+            "Connection: close\r\n\r\n"
+            "WebTor stopped.";
+        send_all(cfd, bye, strlen(bye));
         shutdown(cfd, SHUT_WR);
         close(cfd);
-        ps4_notify("Tor WebGate stopped.");
+        ps4_notify("PS4 WebTor stopped.");
         exit(0);
     } else if (strcmp(path, "/") == 0) {
         serve_shell(cfd);
@@ -475,15 +612,23 @@ static void handle_client(int cfd) {
     } else {
         serve_shell(cfd);
     }
+
+done_client:
+    free(req);
+    free(method);
+    free(path);
+    free(decoded);
+    free(rel_target);
     shutdown(cfd, SHUT_WR);
     close(cfd);
 }
 
 int main(void) {
-    OPENSSL_init_ssl(OPENSSL_INIT_NO_LOAD_CONFIG, NULL);
-
     int srv = socket(AF_INET, SOCK_STREAM, 0);
-    if (srv < 0) { ps4_notify("WebGate error: socket() failed"); return 1; }
+    if (srv < 0) {
+        ps4_notify("WebTor error: socket() failed");
+        return 1;
+    }
 
     int opt = 1;
     setsockopt(srv, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -495,18 +640,19 @@ int main(void) {
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
     if (bind(srv, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        ps4_notify("WebGate already running on port 8080");
+        ps4_notify("WebTor already running on port 8080");
         close(srv);
         return 0;
     }
 
     if (listen(srv, 16) < 0) {
-        ps4_notify("WebGate error: listen() failed");
+        ps4_notify("WebTor error: listen() failed");
         close(srv);
         return 1;
     }
 
-    ps4_notify("Tor WebGate READY on port 8080!");
+    ps4_notify("WebTor PS4 READY on port 8080!");
+    OPENSSL_init_ssl(OPENSSL_INIT_NO_LOAD_CONFIG, NULL);
 
     while (1) {
         int cfd = accept(srv, NULL, NULL);
