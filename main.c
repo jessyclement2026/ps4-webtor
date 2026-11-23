@@ -308,18 +308,19 @@ static void serve_shell(int cfd) {
         "<button type='button' class='sec' onclick='addBm()' title='Save Bookmark'>+ Save</button>"
         "<button type='button' class='sec' onclick='zoom(-0.1)' title='Zoom Out'>A-</button>"
         "<button type='button' class='sec' onclick='zoom(0.1)' title='Zoom In'>A+</button>"
+        "<button type='button' class='danger' onclick='stopTor()' title='Stop Tor Daemon (9051)'>Stop Tor</button>"
         "<button type='button' class='danger' onclick='quitApp()' title='Stop WebTor Server'>Quit</button>"
         "</form>"
         "<div id='bms'>"
-        "<a class='bm' href='#' onclick='go(\"https://github.com/jessyclement2026/webtor-ps4\");return false;'>webtor-ps4</a>"
-        "<a class='bm' href='#' onclick='go(\"https://github.com/jessyclement2026/tor-ps4\");return false;'>tor-ps4</a>"
+        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>webtor-ps4</a>"
+        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>tor-ps4</a>"
         "<span id='user-bms' style='display:inline-flex;gap:8px;flex-wrap:wrap'></span>"
         "<span id='status'><span class='dot' id='sdot'></span><span id='stxt'>Ready</span></span>"
         "</div>"
         "<iframe id='view' name='view' onload='doneLoad()'></iframe>"
         "<div id='foot'>"
         "<span>SOCKS5: 127.0.0.1:9050 &bull; WebTor: 127.0.0.1:8080</span>"
-        "<span>Developed by <a href='#' onclick='go(\"https://github.com/jessyclement2026/tor-ps4\");return false;'>GitHub</a></span>"
+        "<span>Developed by <a href='#' onclick='go(\"https://github.com\");return false;'>jessyclement2026</a></span>"
         "</div>"
         "<script>"
         "var z=1,busy=false;"
@@ -327,7 +328,7 @@ static void serve_shell(int cfd) {
         "<div style='background:#1e1a2e;border:1px solid #3c2c61;border-radius:12px;padding:28px 34px;max-width:480px'>"
         "<h2 style='color:#c79eff;margin-bottom:10px'>PS4 WebTor</h2>"
         "<p style='color:#a99ec9;font-size:14px;line-height:1.5;margin-bottom:18px'>Browse <b>.onion</b> hidden services and modern <b>HTTPS</b> sites through your local Tor daemon (127.0.0.1:9050).</p>"
-        "<div style='font-size:12px;color:#8c82a8'>Enter any address in the bar above or click <b>Quit</b> anytime to stop the payload without rebooting.</div>"
+        "<div style='font-size:12px;color:#8c82a8'>Enter any address above, or use <b>Stop Tor</b> / <b>Quit</b> to stop the background payloads without rebooting.</div>"
         "</div></body>\";"
         "function goHome(){busy=false;document.getElementById('url').value='';setSt('Ready',false);var f=document.getElementById('view');f.style.background='#12101a';f.srcdoc=homeHtml;}"
         "function setSt(t,b){busy=b;document.getElementById('stxt').textContent=t;document.getElementById('sdot').style.background=b?'#f59e0b':'#4caf50';document.getElementById('gobtn').textContent=b?'Stop':'Go';}"
@@ -339,6 +340,7 @@ static void serve_shell(int cfd) {
         "setSt('Loading via Tor...',true);f.src='/fetch?url='+encodeURIComponent(u);}"
         "function reloadFrame(){var f=document.getElementById('view');if(f.src&&f.src!=='about:blank'){setSt('Loading via Tor...',true);f.src=f.src;}}"
         "function zoom(d){z=Math.max(0.6,Math.min(1.8,z+d));document.getElementById('view').style.zoom=z;}"
+        "function stopTor(){setSt('Stopping Tor...',true);var f=document.getElementById('view');f.removeAttribute('srcdoc');f.style.background='#12101a';f.src='/stop-tor';}"
         "function quitApp(){setSt('Stopping...',true);var f=document.getElementById('view');f.removeAttribute('srcdoc');f.style.background='#12101a';f.src='/quit';}"
         "function renderBms(){var b=JSON.parse(localStorage.getItem('wt_bms')||'[]'),h='';"
         "for(var i=0;i<b.length;i++){h+=\"<span class='bm'><a href='#' style='color:#fff;text-decoration:none' onclick='go(\\\"\"+b[i].u+\"\\\");return false;'>\"+b[i].n+\"</a><span class='del' onclick='delBm(\"+i+\")'>&times;</span></span>\";}"
@@ -364,6 +366,7 @@ static void serve_shell(int cfd) {
     send_all(cfd, html, hlen);
     free(hdr);
 }
+
 static void handle_fetch(int cfd, const char *target_url) {
     char *cur_url = malloc(2048);
     char *host = malloc(512);
@@ -629,6 +632,45 @@ static void handle_client(int cfd) {
     if (strncmp(path, "/fetch?url=", 11) == 0) {
         url_decode(path + 11, decoded, 2048);
         handle_fetch(cfd, decoded);
+    } else if (strcmp(path, "/stop-tor") == 0) {
+        int ts = socket(AF_INET, SOCK_STREAM, 0);
+        int ok = 0;
+        if (ts >= 0) {
+            struct sockaddr_in taddr;
+            memset(&taddr, 0, sizeof(taddr));
+            taddr.sin_family = AF_INET;
+            taddr.sin_port = htons(9051);
+            taddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            if (connect(ts, (struct sockaddr *)&taddr, sizeof(taddr)) == 0) {
+                const char *scmd = "AUTHENTICATE \"\"\r\nSIGNAL SHUTDOWN\r\n";
+                send_all(ts, scmd, strlen(scmd));
+                char *sresp = calloc(1, 128);
+                if (sresp) {
+                    recv(ts, sresp, 127, 0);
+                    free(sresp);
+                }
+                ok = 1;
+            }
+            close(ts);
+        }
+
+        const char *body = ok
+            ? "<body style='background:#12101a;color:#4caf50;font-family:sans-serif;padding:30px'><h2>Tor Daemon Stopped</h2><p>tor-ps4 exited cleanly without rebooting.</p></body>"
+            : "<body style='background:#12101a;color:#ff7b7b;font-family:sans-serif;padding:30px'><h2>Could Not Stop Tor</h2><p>Ensure tor-ps4 is running with ControlPort 127.0.0.1:9051 enabled in /data/tor/torrc.</p></body>";
+
+        char *resp_hdr = calloc(1, 256);
+        if (resp_hdr) {
+            int rlen = snprintf(resp_hdr, 256,
+                "HTTP/1.1 %s\r\n"
+                "Content-Type: text/html; charset=utf-8\r\n"
+                "Content-Length: %zu\r\n"
+                "Connection: close\r\n\r\n",
+                ok ? "200 OK" : "502 Bad Gateway", strlen(body));
+            send_all(cfd, resp_hdr, (size_t)rlen);
+            send_all(cfd, body, strlen(body));
+            free(resp_hdr);
+        }
+        if (ok) ps4_notify("Tor Daemon stopped via WebTor.");
     } else if (strcmp(path, "/quit") == 0) {
         const char *bye =
             "HTTP/1.1 200 OK\r\n"
