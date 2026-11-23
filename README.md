@@ -20,7 +20,7 @@ The built-in PS4 web browser lacks modern SSL/TLS support and blocks `.onion` do
 2. Enable **FTP Server** in **GoldHEN → Settings → Server Settings** (port `2121`).
 3. Upload `webtor-ps4.elf` via FTP to **`/data/payloads/webtor-ps4.elf`** (or **`/data/GoldHEN/payloads/webtor-ps4.elf`**).
 4. On your PS4, open **GoldHEN → Utilities → PayLoader → LaunchPad** and select **`webtor-ps4.elf`**.
-5. Open the PS4 **Internet Browser** and go to **`http://127.0.0.1:<PORT>`** *(replace `<PORT>` with your configured local port, e.g., `8080`)*.
+5. Open the PS4 **Internet Browser** and go to **`http://127.0.0.1:8080`**
 6. Type any `.onion` or `https://` address into the WebTor search/URL bar to load it.
 
 ## Building from Source
