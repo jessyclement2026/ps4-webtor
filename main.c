@@ -181,7 +181,7 @@ static void serve_shell(int cfd) {
     send(cfd, hdr, strlen(hdr), 0);
 
     const char *html =
-        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>PS4 Tor WebGate</title>"
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>PS4 WebTor</title>"
         "<style>"
         "*{box-sizing:border-box;margin:0;padding:0;font-family:sans-serif}"
         "body{background:#12101a;color:#eee;display:flex;flex-direction:column;height:100vh;overflow:hidden}"
@@ -212,8 +212,7 @@ static void serve_shell(int cfd) {
         "<button type='button' class='sec' onclick='zoom(0.1)' title='Zoom In'>A+</button>"
         "</form>"
         "<div id='bms'>"
-        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>GitHub: webtor-ps4</a>"
-        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>GitHub: tor-ps4</a>"
+        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>GitHub: https://github.com/jessyclement2026/</a>"
         "<span id='user-bms' style='display:inline-flex;gap:8px;flex-wrap:wrap'></span>"
         "<span id='status'>Ready</span>"
         "</div>"
@@ -232,7 +231,7 @@ static void serve_shell(int cfd) {
         "function renderBms(){var b=JSON.parse(localStorage.getItem('wt_bms')||'[]'),h='';"
         "for(var i=0;i<b.length;i++){h+=\"<span class='bm'><a href='#' style='color:#fff;text-decoration:none' onclick='go(\\\"\"+b[i].u+\"\\\");return false;'>\"+b[i].n+\"</a><span class='del' onclick='delBm(\"+i+\")'>&times;</span></span>\";}"
         "document.getElementById('user-bms').innerHTML=h;}"
-        "function addBm(){var u=document.getElementById('url').value.trim();if(!u)return;var n=u.replace(/^https?:\\/\\//,'').split('/')[0].slice(0,24);"
+        "function addBm(){var u=document.getElementById('url').value.trim();if(!u)return;var n=u.replace(/^https?:\\/\\//,'').split('/').slice(0,24);"
         "var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');b.push({n:n,u:u});localStorage.setItem('wt_bms',JSON.stringify(b));renderBms();}"
         "function delBm(i){var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');b.splice(i,1);localStorage.setItem('wt_bms',JSON.stringify(b));renderBms();}"
         "renderBms();"
