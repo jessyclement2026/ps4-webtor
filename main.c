@@ -92,14 +92,24 @@ void *realloc(void *ptr, size_t size) {
     free(ptr);
     return new_ptr;
 }
-int sceKernelSendNotificationRequest(int device, void *req, size_t size, int blocking);
+int sceKernelDlsym(int handle, const char *symbol, void **addrp);
+
+typedef struct notify_request {
+    char useless1[45];
+    char message[3075];
+} notify_request_t;
 
 static void ps4_notify(const char *msg) {
-    char *req = calloc(1, 1080);
-    if (!req) return;
-    strncpy(req + 45, msg, 1023);
-    sceKernelSendNotificationRequest(0, req, 1080, 0);
-    free(req);
+    static int (*fn_notify)(int, void *, size_t, int) = NULL;
+    if (!fn_notify) {
+        sceKernelDlsym(0x2001, "sceKernelSendNotificationRequest", (void **)&fn_notify);
+    }
+    if (!fn_notify) return;
+
+    notify_request_t req;
+    memset(&req, 0, sizeof(req));
+    strncpy(req.message, msg, sizeof(req.message) - 1);
+    fn_notify(0, &req, sizeof(req), 0);
 }
 
 static void send_all(int fd, const void *buf, size_t len) {
@@ -270,87 +280,196 @@ static void resolve_rel_url(const char *base, const char *href, char *out, size_
     }
 }
 static void serve_shell(int cfd) {
-    const char *html =
-        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>PS4 WebTor</title>"
-        "<style>"
-        "*{box-sizing:border-box;margin:0;padding:0;font-family:sans-serif}"
-        "body{background:#12101a;color:#eee;display:flex;flex-direction:column;height:100vh;overflow:hidden}"
-        "#bar{background:#1e1a2e;padding:10px 14px;display:flex;gap:8px;align-items:center;border-bottom:2px solid #6b3fa0}"
-        "#url-wrap{flex:1;display:flex;align-items:center;background:#0d0b14;border:1px solid #4c3575;border-radius:6px;padding-right:6px}"
-        "#url-wrap:focus-within{border-color:#9d65e5;box-shadow:0 0 0 2px rgba(157,101,229,0.28)}"
-        "#url{flex:1;padding:10px 12px;border:none;background:transparent;color:#fff;font-size:16px;outline:none}"
-        "#clr{background:transparent;color:#8c82a8;padding:4px 8px;font-size:16px}"
-        "#clr:hover{color:#fff;background:transparent}"
-        "button,.bm{background:#6b3fa0;color:#fff;border:none;padding:10px 14px;border-radius:6px;font-size:15px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:4px}"
-        "button:hover,.bm:hover{background:#8452c2}"
-        ".sec{background:#2d2647}"
-        ".danger{background:#7a2638}"
-        ".danger:hover{background:#a3324a}"
-        "#bms{background:#171424;padding:6px 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #2b2440}"
-        ".bm{padding:5px 10px;font-size:13px;background:#2a2342}"
-        ".del{color:#ff7b7b;margin-left:6px;font-weight:bold;cursor:pointer}"
-        "#status{margin-left:auto;font-size:12px;color:#9a90b8;display:inline-flex;align-items:center;gap:6px}"
-        ".dot{width:8px;height:8px;border-radius:50%;background:#4caf50;display:inline-block}"
-        "iframe{flex:1;width:100%;border:none;background:#12101a}"
-        "#foot{background:#171424;padding:5px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid #2b2440;font-size:12px;color:#8c82a8}"
-        "#foot a{color:#b388eb;text-decoration:none;font-weight:bold}"
-        "#foot a:hover{text-decoration:underline}"
-        "</style></head><body>"
-        "<form id='bar' onsubmit='go(document.getElementById(\"url\").value);return false;'>"
-        "<button type='button' class='sec' onclick='goHome()' title='Home'>&#8962;</button>"
-        "<button type='button' class='sec' onclick='history.back()' title='Back'>&larr;</button>"
-        "<button type='button' class='sec' onclick='reloadFrame()' title='Reload'><svg width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><path d='M21 12a9 9 0 1 1-3-6.7L21 8'/><polyline points='21 3 21 8 16 8'/></svg></button>"
-        "<div id='url-wrap'>"
-        "<input id='url' type='text' placeholder='Enter .onion or https:// URL...' autocomplete='off'>"
-        "<button type='button' id='clr' onclick='var i=document.getElementById(\"url\");i.value=\"\";i.focus();' title='Clear'>&times;</button>"
-        "</div>"
-        "<button type='submit' id='gobtn'>Go</button>"
-        "<button type='button' class='sec' onclick='addBm()' title='Save Bookmark'>+ Save</button>"
-        "<button type='button' class='sec' onclick='zoom(-0.1)' title='Zoom Out'>A-</button>"
-        "<button type='button' class='sec' onclick='zoom(0.1)' title='Zoom In'>A+</button>"
-        "<button type='button' class='danger' onclick='stopTor()' title='Stop Tor Daemon (9051)'>Stop Tor</button>"
-        "<button type='button' class='danger' onclick='quitApp()' title='Stop WebTor Server'>Quit</button>"
-        "</form>"
-        "<div id='bms'>"
-        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>webtor-ps4</a>"
-        "<a class='bm' href='#' onclick='go(\"https://github.com\");return false;'>tor-ps4</a>"
-        "<span id='user-bms' style='display:inline-flex;gap:8px;flex-wrap:wrap'></span>"
-        "<span id='status'><span class='dot' id='sdot'></span><span id='stxt'>Ready</span></span>"
-        "</div>"
-        "<iframe id='view' name='view' onload='doneLoad()'></iframe>"
-        "<div id='foot'>"
-        "<span>SOCKS5: 127.0.0.1:9050 &bull; WebTor: 127.0.0.1:8080</span>"
-        "<span>Developed by <a href='#' onclick='go(\"https://github.com\");return false;'>jessyclement2026</a></span>"
-        "</div>"
-        "<script>"
-        "var z=1,busy=false;"
-        "var homeHtml=\"<body style='background:#12101a;color:#eee;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:90vh;margin:0;text-align:center'>"
-        "<div style='background:#1e1a2e;border:1px solid #3c2c61;border-radius:12px;padding:28px 34px;max-width:480px'>"
-        "<h2 style='color:#c79eff;margin-bottom:10px'>PS4 WebTor</h2>"
-        "<p style='color:#a99ec9;font-size:14px;line-height:1.5;margin-bottom:18px'>Browse <b>.onion</b> hidden services and modern <b>HTTPS</b> sites through your local Tor daemon (127.0.0.1:9050).</p>"
-        "<div style='font-size:12px;color:#8c82a8'>Enter any address above, or use <b>Stop Tor</b> / <b>Quit</b> to stop the background payloads without rebooting.</div>"
-        "</div></body>\";"
-        "function goHome(){busy=false;document.getElementById('url').value='';setSt('Ready',false);var f=document.getElementById('view');f.style.background='#12101a';f.srcdoc=homeHtml;}"
-        "function setSt(t,b){busy=b;document.getElementById('stxt').textContent=t;document.getElementById('sdot').style.background=b?'#f59e0b':'#4caf50';document.getElementById('gobtn').textContent=b?'Stop':'Go';}"
-        "function doneLoad(){if(busy)setSt('Ready',false);}"
-        "function go(u){if(busy){var f=document.getElementById('view');f.src='about:blank';setSt('Stopped',false);return;}"
-        "u=u.trim();if(!u)return;if(!/^https?:\\/\\//i.test(u))u='http://'+u;"
-        "document.getElementById('url').value=u;"
-        "var f=document.getElementById('view');f.removeAttribute('srcdoc');f.style.background='#fff';"
-        "setSt('Loading via Tor...',true);f.src='/fetch?url='+encodeURIComponent(u);}"
-        "function reloadFrame(){var f=document.getElementById('view');if(f.src&&f.src!=='about:blank'){setSt('Loading via Tor...',true);f.src=f.src;}}"
-        "function zoom(d){z=Math.max(0.6,Math.min(1.8,z+d));document.getElementById('view').style.zoom=z;}"
-        "function stopTor(){setSt('Stopping Tor...',true);var f=document.getElementById('view');f.removeAttribute('srcdoc');f.style.background='#12101a';f.src='/stop-tor';}"
-        "function quitApp(){setSt('Stopping...',true);var f=document.getElementById('view');f.removeAttribute('srcdoc');f.style.background='#12101a';f.src='/quit';}"
-        "function renderBms(){var b=JSON.parse(localStorage.getItem('wt_bms')||'[]'),h='';"
-        "for(var i=0;i<b.length;i++){h+=\"<span class='bm'><a href='#' style='color:#fff;text-decoration:none' onclick='go(\\\"\"+b[i].u+\"\\\");return false;'>\"+b[i].n+\"</a><span class='del' onclick='delBm(\"+i+\")'>&times;</span></span>\";}"
-        "document.getElementById('user-bms').innerHTML=h;}"
-        "function addBm(){var u=document.getElementById('url').value.trim();if(!u)return;var n=u.replace(/^https?:\\/\\//,'').split('/').shift().slice(0,24);"
-        "var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');b.push({n:n,u:u});localStorage.setItem('wt_bms',JSON.stringify(b));renderBms();}"
-        "function delBm(i){var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');b.splice(i,1);localStorage.setItem('wt_bms',JSON.stringify(b));renderBms();}"
-        "renderBms();goHome();"
-        "window.addEventListener('message',function(e){if(e.data&&e.data.torUrl){document.getElementById('url').value=e.data.torUrl;setSt('Ready',false);}});"
-        "</script></body></html>";
+
+const char *html =
+    "<!DOCTYPE html><html><head><meta charset='utf-8'><title>WebTor PS4</title>"
+    "<style>"
+    "*{box-sizing:border-box;margin:0;padding:0;font-family:sans-serif}"
+    "body{background:#12101a;color:#eee;display:flex;flex-direction:column;height:100vh;overflow:hidden}"
+    "#bar{background:#1e1a2e;padding:10px 14px;display:flex;gap:8px;align-items:center;border-bottom:2px solid #6b3fa0}"
+    "#url-wrap{flex:1;display:flex;align-items:center;background:#0d0b14;border:1px solid #4c3575;border-radius:6px;padding-right:6px}"
+    "#url-wrap:focus-within{border-color:#9d65e5;box-shadow:0 0 0 2px rgba(157,101,229,0.28)}"
+    "#url{flex:1;padding:10px 12px;border:none;background:transparent;color:#fff;font-size:16px;outline:none}"
+    "#clr{background:transparent;color:#8c82a8;padding:4px 8px;font-size:16px}"
+    "#clr:hover{color:#fff;background:transparent}"
+    "button,.bm{background:#6b3fa0;color:#fff;border:none;padding:10px 14px;border-radius:6px;font-size:15px;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;justify-content:center;gap:4px}"
+    "button:hover,.bm:hover{background:#8452c2}"
+    ".sec{background:#2d2647}"
+    ".danger{background:#7a2638}"
+    ".danger:hover{background:#a3324a}"
+    ".ok{background:#247a48}"
+    ".ok:hover{background:#2ea05e}"
+    "#bms{background:#171424;padding:6px 14px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;border-bottom:1px solid #2b2440}"
+    ".bm{padding:5px 10px;font-size:13px;background:#2a2342}"
+    ".del{color:#ff7b7b;margin-left:6px;font-weight:bold;cursor:pointer}"
+    "#status{margin-left:auto;font-size:12px;color:#9a90b8;display:inline-flex;align-items:center;gap:6px}"
+    ".dot{width:8px;height:8px;border-radius:50%;background:#4caf50;display:inline-block}"
+    "iframe{flex:1;width:100%;border:none;background:#12101a}"
+    "#foot{background:#171424;padding:5px 14px;display:flex;justify-content:space-between;align-items:center;border-top:1px solid #2b2440;font-size:12px;color:#8c82a8}"
+    "#foot a{color:#b388eb;text-decoration:none;font-weight:bold}"
+    "#foot a:hover{text-decoration:underline}"
+    "</style></head><body>"
+    "<form id='bar' onsubmit='go(document.getElementById(\"url\").value);return false;'>"
+    "<button type='button' class='sec' onclick='goHome()' title='Home'><svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-2px'><path d='M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/><polyline points='9 22 9 12 15 12 15 22'/></svg></button>"
+    "<button type='button' class='sec' onclick='history.back()' title='Back'>&larr;</button>"
+    "<button type='button' class='sec' onclick='reloadFrame()' title='Reload'><svg width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round' style='vertical-align:-2px'><polyline points='23 4 23 10 17 10'/><path d='M20.49 15a9 9 0 1 1-2.12-9.36L23 10'/></svg></button>"
+    "<div id='url-wrap'>"
+    "<input id='url' type='text' placeholder='Enter .onion or https:// URL...' autocomplete='off'>"
+    "<button type='button' id='clr' onclick='var i=document.getElementById(\"url\");i.value=\"\";i.focus();' title='Clear'>&times;</button>"
+    "</div>"
+    "<button type='submit' id='gobtn'>Go</button>"
+    "<button type='button' class='sec' onclick='addBm()' title='Save Bookmark'>+ Save</button>"
+    "<button type='button' class='sec' onclick='zoom(-0.1)' title='Zoom Out'>-</button>"
+    "<button type='button' class='sec' onclick='zoom(0.1)' title='Zoom In'>+</button>"
+    "<button type='button' id='torbtn' class='danger' onclick='toggleTor()' title='Stop or Start Tor Daemon'>Stop Tor</button>"
+    "</form>"
+    "<div id='bms'>"
+    "<a class='bm' href='#' onclick='go(\"https://github.com/jessyclement2026/webtor-ps4\");return false;'>webtor-ps4</a>"
+    "<a class='bm' href='#' onclick='go(\"https://github.com/jessyclement2026/ps4-tor\");return false;'>tor-ps4</a>"
+    "<span id='user-bms' style='display:inline-flex;gap:8px;flex-wrap:wrap'></span>"
+    "<span id='status'><span class='dot' id='sdot'></span><span id='stxt'>Ready</span></span>"
+    "</div>"
+    "<iframe id='view' name='view' onload='doneLoad()'></iframe>"
+    "<div id='foot'>"
+    "<span>SOCKS5: 127.0.0.1:9050 &bull; WebTor: 127.0.0.1:8080</span>"
+    "<span>Developed by <a href='#' onclick='go(\"https://github.com/jessyclement2026\");return false;'>cutiefly</a></span>"
+    "</div>"
+    "<script>"
+    "var z=1,busy=false,torOn=true,torAction='';"
+    "var homeHtml=\"<body style='background:#12101a;color:#eee;font-family:sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:90vh;margin:0;text-align:center'>"
+    "<div style='background:#1e1a2e;border:1px solid #3c2c61;border-radius:12px;padding:28px 34px;max-width:480px'>"
+    "<h2 style='color:#c79eff;margin-bottom:10px'>PS4 WebTor</h2>"
+    "<p style='color:#a99ec9;font-size:14px;line-height:1.5;margin-bottom:18px'>Browse <b>.onion</b> hidden services and modern <b>HTTPS</b> sites through your local Tor daemon (127.0.0.1:9050).</p>"
+    "<div style='font-size:12px;color:#8c82a8'>Enter any address above, or use <b>Stop Tor</b>/<b>Start Tor</b> to stop or start the background tor daemon without rebooting.</div>"
+    "</div></body>\";"
+
+    "function applyZoom(){"
+    "var f=document.getElementById('view');"
+    "try{"
+    "var d=f.contentDocument||f.contentWindow.document;"
+    "if(d&&d.documentElement){"
+    "var el=d.documentElement;"
+    "el.style.transformOrigin='top left';"
+    "el.style.transform='scale('+z+')';"
+    "el.style.width=(100/z)+'%';"
+    "el.style.minHeight=(100/z)+'vh';"
+    "}"
+    "}catch(e){}"
+    "}"
+
+    "function goHome(){"
+    "busy=false;torAction='';"
+    "document.getElementById('url').value='';"
+    "setSt('Ready',false);"
+    "var f=document.getElementById('view');"
+    "f.style.background='#12101a';"
+    "f.srcdoc=homeHtml;"
+    "}"
+
+    "function setSt(t,b){"
+    "busy=b;"
+    "document.getElementById('stxt').textContent=t;"
+    "document.getElementById('sdot').style.background=b?'#f59e0b':'#4caf50';"
+    "document.getElementById('gobtn').textContent=b?'Stop':'Go';"
+    "}"
+
+    "function doneLoad(){"
+    "if(busy){"
+    "if(torAction==='stop'){setTorBtn(false);setSt('Tor Stopped',false);torAction='';}"
+    "else if(torAction==='start'){setTorBtn(true);setSt('Ready',false);torAction='';}"
+    "else{setSt(torOn?'Ready':'Tor Stopped',false);}"
+    "}"
+    "applyZoom();"
+    "}"
+
+    "function go(u){"
+    "if(busy){"
+    "var f=document.getElementById('view');"
+    "f.src='about:blank';"
+    "setSt('Stopped',false);"
+    "return;"
+    "}"
+    "u=u.trim();"
+    "if(!u)return;"
+    "if(!/^https?:\\/\\//i.test(u))u='http://'+u;"
+    "document.getElementById('url').value=u;"
+    "var f=document.getElementById('view');"
+    "f.removeAttribute('srcdoc');"
+    "f.style.background='#fff';"
+    "setSt('Loading via Tor...',true);"
+    "f.src='/fetch?url='+encodeURIComponent(u);"
+    "}"
+
+    "function reloadFrame(){"
+    "var f=document.getElementById('view');"
+    "if(f.src&&f.src!=='about:blank'){"
+    "setSt('Loading via Tor...',true);"
+    "f.src=f.src;"
+    "}"
+    "}"
+
+    "function zoom(d){"
+    "z=Math.max(0.6,Math.min(1.8,Math.round((z+d)*10)/10));"
+    "applyZoom();"
+    "}"
+
+    "function setTorBtn(on){"
+    "torOn=on;"
+    "var b=document.getElementById('torbtn');"
+    "b.textContent=on?'Stop Tor':'Start Tor';"
+    "b.className=on?'danger':'ok';"
+    "}"
+
+    "function toggleTor(){"
+    "var f=document.getElementById('view');"
+    "f.removeAttribute('srcdoc');"
+    "f.style.background='#12101a';"
+    "if(torOn){"
+    "torAction='stop';"
+    "setSt('Stopping Tor...',true);"
+    "f.src='/stop-tor';"
+    "}else{"
+    "torAction='start';"
+    "setSt('Starting Tor...',true);"
+    "f.src='/start-tor';"
+    "}"
+    "}"
+
+    "function renderBms(){"
+    "var b=JSON.parse(localStorage.getItem('wt_bms')||'[]'),h='';"
+    "for(var i=0;i<b.length;i++){"
+    "h+=\"<span class='bm'><a href='#' style='color:#fff;text-decoration:none' onclick='go(\\\"\"+b[i].u+\"\\\");return false;'>\"+b[i].n+\"</a><span class='del' onclick='delBm(\"+i+\")'>&times;</span></span>\";"
+    "}"
+    "document.getElementById('user-bms').innerHTML=h;"
+    "}"
+
+    "function addBm(){"
+    "var u=document.getElementById('url').value.trim();"
+    "if(!u)return;"
+    "var n=u.replace(/^https?:\\/\\//,'').split('/').shift().slice(0,24);"
+    "var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');"
+    "b.push({n:n,u:u});"
+    "localStorage.setItem('wt_bms',JSON.stringify(b));"
+    "renderBms();"
+    "}"
+
+    "function delBm(i){"
+    "var b=JSON.parse(localStorage.getItem('wt_bms')||'[]');"
+    "b.splice(i,1);"
+    "localStorage.setItem('wt_bms',JSON.stringify(b));"
+    "renderBms();"
+    "}"
+
+    "renderBms();"
+    "goHome();"
+    "window.addEventListener('message',function(e){"
+    "if(e.data&&e.data.torUrl){"
+    "document.getElementById('url').value=e.data.torUrl;"
+    "setSt('Ready',false);"
+    "applyZoom();"
+    "}"
+    "});"
+    "</script></body></html>";
 
     size_t hlen = strlen(html);
     char *hdr = calloc(1, 256);
@@ -425,7 +544,7 @@ static void handle_fetch(int cfd, const char *target_url) {
             const char *err =
                 "HTTP/1.1 502 Bad Gateway\r\nContent-Type: text/html\r\nConnection: close\r\n\r\n"
                 "<body style='background:#12101a;color:#ff7b7b;font-family:sans-serif;padding:30px'>"
-                "<h2>Tor Connection Failed</h2><p>Could not reach site via 127.0.0.1:9050. Make sure tor-ps4.elf is running and bootstrapped to 100%.</p></body>";
+                "<h2>Tor Connection Failed</h2><p>Could not reach site via 127.0.0.1:9050. Make sure tor-ps4.elf is running and bootstrapped to 100% and your url is correct.</p></body>";
             send_all(cfd, err, strlen(err));
             goto cleanup_vars;
         }
@@ -671,18 +790,50 @@ static void handle_client(int cfd) {
             free(resp_hdr);
         }
         if (ok) ps4_notify("Tor Daemon stopped via WebTor.");
-    } else if (strcmp(path, "/quit") == 0) {
-        const char *bye =
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/plain\r\n"
-            "Content-Length: 15\r\n"
-            "Connection: close\r\n\r\n"
-            "WebTor stopped.";
-        send_all(cfd, bye, strlen(bye));
-        shutdown(cfd, SHUT_WR);
-        close(cfd);
-        ps4_notify("PS4 WebTor stopped.");
-        exit(0);
+    } else if (strcmp(path, "/start-tor") == 0) {
+        int ok = 0;
+        FILE *fp = fopen("/data/payloads/tor-ps4.elf", "rb");
+        if (fp) {
+            int ls = socket(AF_INET, SOCK_STREAM, 0);
+            if (ls >= 0) {
+                struct sockaddr_in laddr;
+                memset(&laddr, 0, sizeof(laddr));
+                laddr.sin_family = AF_INET;
+                laddr.sin_port = htons(9090);
+                laddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+                if (connect(ls, (struct sockaddr *)&laddr, sizeof(laddr)) == 0) {
+                    char *buf = malloc(4096);
+                    if (buf) {
+                        size_t n;
+                        while ((n = fread(buf, 1, 4096, fp)) > 0) {
+                            send_all(ls, buf, n);
+                        }
+                        free(buf);
+                        ok = 1;
+                    }
+                }
+                close(ls);
+            }
+            fclose(fp);
+        }
+
+        const char *body = ok
+            ? "<body style='background:#12101a;color:#4caf50;font-family:sans-serif;padding:30px'><h2>Tor Daemon Started</h2><p>tor-ps4.elf was sent to the local payload loader.</p></body>"
+            : "<body style='background:#12101a;color:#ff7b7b;font-family:sans-serif;padding:30px'><h2>Could Not Start Tor</h2><p>Ensure /data/payloads/tor-ps4.elf exists and GoldHEN BinLoader (port 9090) is enabled.</p></body>";
+
+        char *resp_hdr = calloc(1, 256);
+        if (resp_hdr) {
+            int rlen = snprintf(resp_hdr, 256,
+                "HTTP/1.1 %s\r\n"
+                "Content-Type: text/html; charset=utf-8\r\n"
+                "Content-Length: %zu\r\n"
+                "Connection: close\r\n\r\n",
+                ok ? "200 OK" : "502 Bad Gateway", strlen(body));
+            send_all(cfd, resp_hdr, (size_t)rlen);
+            send_all(cfd, body, strlen(body));
+            free(resp_hdr);
+        }
+        if (ok) ps4_notify("Tor Daemon started via WebTor.");
     } else if (strcmp(path, "/") == 0) {
         serve_shell(cfd);
     } else if (last_origin != NULL && *path == '/') {
