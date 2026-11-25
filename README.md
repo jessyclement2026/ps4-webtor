@@ -81,7 +81,7 @@ Official releases for this project are also published on the Brewology PS4 Homeb
 
 ## Credits & License
 - **Tor Core:** Built on top of the C-Tor source code from [The Tor Project](https://torproject.org) (BSD-3-Clause).
-- **Dependencies:** Statically linked with [OpenSSL](https://openssl.org),
+- **Dependencies:** Statically linked with [OpenSSL 4.1.0](https://www.openssl.org/) and [zlib 1.4](https://zlib.net).
 - **SDK:** [ps4-payload-dev / ps4-payload-sdk](https://github.com/ps4-payload-dev/sdk).
 - **License:** **GPL-3.0-or-later** (inherited from `PBS-Payload`).
 
