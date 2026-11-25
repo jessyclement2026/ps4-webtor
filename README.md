@@ -1,9 +1,9 @@
-# PS4 WebTor Browser Proxy Payload (`webtor-ps4`)
+# PS4 WebTor Browser Proxy Payload (`ps4-webtor`)
 
 A native companion web proxy payload (`.elf`) with a built-in web browser UI for jailbroken PlayStation 4 consoles. Designed to work alongside **[tor-ps4](https://github.com/jessyclement2026/tor-ps4)**, it allows you to load `.onion` hidden services and modern HTTPS websites directly in the stock PS4 web browser.
 
 ## How It Works
-The built-in PS4 web browser lacks modern SSL/TLS support and blocks `.onion` domains. `webtor-ps4` solves this by hosting a local HTTP web interface on the console. When you enter a URL into the WebTor UI, the payload fetches and downloads the page locally through `tor-ps4`'s SOCKS5 proxy (`127.0.0.1:9050`) using statically linked OpenSSL, then serves it cleanly over local HTTP to your PS4 browser.
+The built-in PS4 web browser lacks modern SSL/TLS support and blocks `.onion` domains. `ps4-webtor` solves this by hosting a local HTTP web interface on the console. When you enter a URL into the WebTor UI, the payload fetches and downloads the page locally through `tor-ps4`'s SOCKS5 proxy (`127.0.0.1:9050`) using statically linked OpenSSL, then serves it cleanly over local HTTP to your PS4 browser.
 
 ## Features
 - **Built-in Web Browser UI:** Clean local web interface accessible directly from the PS4 stock browser.
@@ -18,8 +18,8 @@ The built-in PS4 web browser lacks modern SSL/TLS support and blocks `.onion` do
 ## Usage on PS4
 1. Make sure **`tor-ps4.elf`** is already running in the background on your PS4.
 2. Enable **FTP Server** in **GoldHEN → Settings → Server Settings** (port `2121`).
-3. Upload `webtor-ps4.elf` via FTP to **`/data/payloads/webtor-ps4.elf`** (or **`/data/GoldHEN/payloads/webtor-ps4.elf`**).
-4. On your PS4, open **GoldHEN → Utilities → PayLoader → LaunchPad** and select **`webtor-ps4.elf`**.
+3. Upload `ps4-webtor.elf` via FTP to **`/data/payloads/ps4-webtor.elf`** (or **`/data/GoldHEN/payloads/ps4-webtor.elf`**).
+4. On your PS4, open **GoldHEN → Utilities → PayLoader → LaunchPad** and select **`ps4-webtor.elf`**.
 5. Open the PS4 **Internet Browser** and go to **`http://127.0.0.1:8080`**
 6. Type any `.onion` or `https://` address into the WebTor search/URL bar to load it.
 
@@ -54,14 +54,14 @@ The built-in PS4 web browser lacks modern SSL/TLS support and blocks `.onion` do
 
 ### 2. Download `ps4-payload-sdk` & Build Payload
 ```bash
-wget https://github.com/jessyclement2026/tor-ps4/jessyclement2026/webtor-ps4/ps4-payload-dev/sdk/releases/latest/download/ps4-payload-sdk.zip
+wget https://github.com/jessyclement2026/tor-ps4/jessyclement2026/ps4-webtor/ps4-payload-dev/sdk/releases/latest/download/ps4-payload-sdk.zip
 unzip ps4-payload-sdk.zip
 export PS4SDK=\$PWD/ps4-payload-sdk
 
 chmod +x build.sh
 ./build.sh
 ```
-This compiles `zlib` and `OpenSSL`, and outputs `webtor-ps4.elf`.
+This compiles `zlib` and `OpenSSL`, and outputs `ps4-webtor.elf`.
 
 ## Third-Party Libraries
 Pre-compiled releases statically link:

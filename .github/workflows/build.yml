@@ -52,22 +52,22 @@ jobs:
           chmod +x build.sh
           ./build.sh
 
-      - name: Upload webtor-ps4.elf artifact
+      - name: Upload ps4-webtor.elf artifact
         uses: actions/upload-artifact@v4
         with:
-          name: webtor-ps4-elf
-          path: webtor-ps4.elf
+          name: ps4-webtor-elf
+          path: ps4-webtor.elf
           if-no-files-found: error
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          name: PS4 WebTor Browser Proxy Payload ${{ github.ref_name }} (webtor-ps4.elf)
-          files: webtor-ps4.elf
+          name: PS4 WebTor Browser Proxy Payload ${{ github.ref_name }} (ps4-webtor.elf)
+          files: ps4-webtor.elf
           generate_release_notes: true
           body: |
-            ## Native WebTor Browser Proxy Payload for Jailbroken PS4 (`webtor-ps4.elf`)
+            ## Native WebTor Browser Proxy Payload for Jailbroken PS4 (`ps4-webtor.elf`)
 
             A companion web proxy payload with a built-in web browser UI for jailbroken PlayStation 4 consoles, allowing you to browse `.onion` hidden services and modern HTTPS websites directly in the stock PS4 browser via **[tor-ps4](https://github.com/jessyclement2026/tor-ps4)**.
 
@@ -78,7 +78,7 @@ jobs:
 
             ### Quick Start Guide
             1. Make sure **`tor-ps4.elf`** is already running in the background (`127.0.0.1:9050`).
-            2. Upload `webtor-ps4.elf` via FTP to `/data/payloads/webtor-ps4.elf` and launch it from GoldHEN's PayLoader.
+            2. Upload `ps4-webtor.elf` via FTP to `/data/payloads/ps4-webtor.elf` and launch it from GoldHEN's PayLoader.
             3. Open the PS4 Internet Browser and navigate to the local WebTor UI address.
 
             > **⚠️ Important:** Make sure **Automatic Downloads / System Software Updates** are completely disabled in **PS4 Settings → System → Automatic Downloads** before connecting online so your console does not accidentally upgrade its firmware.

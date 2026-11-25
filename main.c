@@ -324,7 +324,7 @@ const char *html =
     "<button type='button' id='torbtn' class='danger' onclick='toggleTor()' title='Stop or Start Tor Daemon'>Stop Tor</button>"
     "</form>"
     "<div id='bms'>"
-    "<a class='bm' href='#' onclick='go(\"https://github.com/jessyclement2026/webtor-ps4\");return false;'>webtor-ps4</a>"
+    "<a class='bm' href='#' onclick='go(\"https://github.com/jessyclement2026/ps4-webtor\");return false;'>ps4-webtor</a>"
     "<a class='bm' href='#' onclick='go(\"https://github.com/jessyclement2026/ps4-tor\");return false;'>tor-ps4</a>"
     "<span id='user-bms' style='display:inline-flex;gap:8px;flex-wrap:wrap'></span>"
     "<span id='status'><span class='dot' id='sdot'></span><span id='stxt'>Ready</span></span>"

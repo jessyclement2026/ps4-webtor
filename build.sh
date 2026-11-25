@@ -48,11 +48,11 @@ cd openssl-4.1.0
 make -j$(nproc) build_libs && make install_dev
 cd "$SRCDIR"
 
-# 4. Build final PS4 Web Proxy payload (webtor-ps4.elf)
+# 4. Build final PS4 Web Proxy payload (ps4-webtor.elf)
 cd "$WORKDIR"
 make
 
 echo ""
-echo "=== BUILD COMPLETE: $WORKDIR/webtor-ps4.elf ==="
-echo "Upload via FTP to /data/payloads/webtor-ps4.elf (or /data/GoldHEN/payloads/webtor-ps4.elf)"
+echo "=== BUILD COMPLETE: $WORKDIR/ps4-webtor.elf ==="
+echo "Upload via FTP to /data/payloads/ps4-webtor.elf (or /data/GoldHEN/payloads/ps4-webtor.elf)"
 echo "and launch from: GoldHEN -> Utilities -> PayLoader -> LaunchPad"
